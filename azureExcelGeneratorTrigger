@@ -1,0 +1,77 @@
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Threading.Tasks;
+using Microsoft.Azure.WebJobs;
+using Microsoft.Azure.WebJobs.Extensions.Http;
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
+using OfficeOpenXml;
+using Microsoft.WindowsAzure.Storage;
+using Microsoft.WindowsAzure.Storage.Blob;
+
+public static class GenerateExcelFunction
+{
+    [FunctionName("GenerateExcel")]
+    public static async Task<HttpResponseMessage> Run(
+        [HttpTrigger(AuthorizationLevel.Function, "post", Route = null)] HttpRequestMessage req,
+        ILogger log)
+    {
+        string requestBody = await req.Content.ReadAsStringAsync();
+        dynamic data = JsonConvert.DeserializeObject(requestBody);
+
+        string password = data?.password; // Password for encryption
+        var sheetsData = data?.sheets; // This should be an array of sheet data
+
+        if (password == null || sheetsData == null)
+        {
+            return req.CreateResponse(HttpStatusCode.BadRequest, "Invalid input data");
+        }
+
+        using (var package = new ExcelPackage())
+        {
+            foreach (var sheetData in sheetsData)
+            {
+                var sheet = package.Workbook.Worksheets.Add(sheetData.name.ToString());
+                var headers = ((string)sheetData.headers).Split(',');
+                var rows = sheetData.rows.ToObject<string[][]>();
+
+                // Add headers
+                for (int i = 0; i < headers.Length; i++)
+                {
+                    sheet.Cells[1, i + 1].Value = headers[i];
+                }
+
+                // Add data rows
+                for (int i = 0; i < rows.Length; i++)
+                {
+                    for (int j = 0; j < rows[i].Length; j++)
+                    {
+                        sheet.Cells[i + 2, j + 1].Value = rows[i][j];
+                    }
+                }
+            }
+
+            // Apply encryption
+            package.Encryption.Password = password;
+
+            // Save the Excel file to a MemoryStream
+            var stream = new MemoryStream();
+            package.SaveAs(stream);
+            stream.Position = 0;
+
+            // Upload to Blob Storage
+            string connectionString = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
+            string containerName = "excel-files";
+            string blobName = $"excel-{DateTime.UtcNow.Ticks}.xlsx";
+
+            CloudBlobClient blobClient = CloudStorageAccount.Parse(connectionString).CreateCloudBlobClient();
+            CloudBlobContainer container = blobClient.GetContainerReference(containerName);
+            await container.CreateIfNotExistsAsync();
+            CloudBlockBlob blob = container.GetBlockBlobReference(blobName);
+            await blob.UploadFromStreamAsync(stream);
+
+            return req.CreateResponse(HttpStatusCode.OK, $"File saved to Blob Storage as {blobName}");
+        }
+    }
+}
